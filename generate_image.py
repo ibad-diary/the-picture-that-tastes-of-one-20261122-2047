@@ -1,219 +1,251 @@
 #!/usr/bin/env python3
-"""PURE HONEY — one picture of a single ingredient: golden honey.
+"""PURE HONEY - one picture that tastes of honey.
 
-Draws a wooden honey dipper pouring one glossy S-shaped ribbon of honey
-into a pool of honey, on a dark warm background with a faint honeycomb.
-Pure Pillow, no network, no randomness: two runs are byte-identical.
-
-Run:  python3 generate_image.py   -> writes entry.png (1024x1024, <=1 MiB)
+Deterministic, PIL-only, no network, no randomness. Renders a wooden
+honey dipper pouring a single glossy S-shaped ribbon of golden honey
+into a honey pool, on a warm dark background with a faint honeycomb.
+Writes entry.png (1024x1024, < 1 MiB) next to this script, or to the
+path given as argv[1].
 """
-
 import math
+import os
+import sys
+
 from PIL import Image, ImageDraw, ImageFilter
 
-S = 2                      # supersample factor
-W = H = 1024 * S           # working canvas
-OUT = "entry.png"
+W = H = 1024
 
-# ---- palette ------------------------------------------------------------
-BG_TOP = (44, 26, 12)
-BG_BOT = (14, 8, 3)
-GLOW = (150, 84, 24)
-COMB = (122, 74, 26)
-WOOD = (139, 90, 43)
-WOOD_DARK = (96, 58, 24)
-WOOD_LIGHT = (176, 122, 66)
-HONEY_DARK = (146, 82, 4)
-HONEY_MID = (216, 134, 6)
-HONEY_LIGHT = (247, 183, 51)
-HONEY_BRIGHT = (255, 201, 60)
-HIGHLIGHT = (255, 236, 170)
+GOLD = (247, 183, 51)
+GOLD_DEEP = (201, 121, 10)
+GOLD_DARK = (146, 86, 8)
+GOLD_LIGHT = (255, 222, 140)
+WOOD = (139, 92, 44)
+WOOD_DARK = (88, 54, 22)
+WOOD_LIGHT = (183, 128, 62)
 
 
 def lerp(a, b, t):
     return tuple(int(round(a[i] + (b[i] - a[i]) * t)) for i in range(3))
 
 
-def ribbon_polygon(path, width):
-    """Thick smooth ribbon as one filled polygon (no segment seams)."""
-    n = len(path)
-    left, right = [], []
-    for i, (x, y) in enumerate(path):
-        x0, y0 = path[max(i - 1, 0)]
-        x1, y1 = path[min(i + 1, n - 1)]
-        dx, dy = x1 - x0, y1 - y0
-        ln = math.hypot(dx, dy) or 1.0
-        nx, ny = -dy / ln * width / 2, dx / ln * width / 2
-        left.append((x + nx, y + ny))
-        right.append((x - nx, y - ny))
-    return left + right[::-1]
+def vertical_gradient(top, bottom):
+    strip = Image.new("RGB", (1, H))
+    sp = strip.load()
+    for y in range(H):
+        sp[0, y] = lerp(top, bottom, y / (H - 1))
+    return strip.resize((W, H))
 
 
-def catmull_rom(points, samples=24):
-    """Smooth curve through points (Catmull-Rom), returns list of (x, y)."""
-    pts = [points[0]] + points + [points[-1]]
-    out = []
-    for i in range(len(pts) - 3):
-        p0, p1, p2, p3 = pts[i], pts[i + 1], pts[i + 2], pts[i + 3]
-        for j in range(samples):
-            t = j / samples
-            t2, t3 = t * t, t * t * t
-            x = 0.5 * ((2 * p1[0]) + (-p0[0] + p2[0]) * t
-                       + (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * t2
-                       + (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * t3)
-            y = 0.5 * ((2 * p1[1]) + (-p0[1] + p2[1]) * t
-                       + (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * t2
-                       + (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * t3)
-            out.append((x, y))
-    out.append(points[-1])
-    return out
+def radial_glow(cx, cy, radius, color, peak):
+    """Soft round glow centred at (cx, cy), peak alpha at the centre."""
+    size = 256
+    mask = Image.new("L", (size, size), 0)
+    mp = mask.load()
+    for j in range(size):
+        for i in range(size):
+            dx = (i - size / 2) / (size / 2)
+            dy = (j - size / 2) / (size / 2)
+            d = math.sqrt(dx * dx + dy * dy)
+            v = max(0.0, 1.0 - d)
+            mp[i, j] = int(peak * v * v)
+    glow = Image.new("RGBA", (size, size), color + (0,))
+    glow.putalpha(mask)
+    glow = glow.resize((radius * 2, radius * 2), Image.BICUBIC)
+    layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    layer.alpha_composite(glow, (cx - radius, cy - radius))
+    return layer
 
 
-def vertical_gradient(size, top, bottom):
-    w, h = size
-    img = Image.new("RGB", (1, h))
-    px = img.load()
-    for y in range(h):
-        px[0, y] = lerp(top, bottom, y / (h - 1))
-    return img.resize((w, h))
+def hexagon(cx, cy, r):
+    pts = []
+    for k in range(6):
+        a = math.pi / 3 * k + math.pi / 6
+        pts.append((cx + r * math.cos(a), cy + r * math.sin(a)))
+    return pts
 
 
-def radial_glow(size, center, radius, color, peak=110):
-    layer = Image.new("L", size, 0)
+def draw_background(img):
+    base = vertical_gradient((24, 13, 6), (60, 35, 14)).convert("RGBA")
+    img.alpha_composite(base)
+    img.alpha_composite(radial_glow(512, 480, 520, (122, 70, 18), 90))
+    img.alpha_composite(radial_glow(512, 300, 300, (160, 100, 30), 60))
+
+
+def draw_honeycomb(img):
+    """Faint honeycomb clusters in the upper corners, barely there."""
+    layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     d = ImageDraw.Draw(layer)
-    steps = 48
-    for i in range(steps, 0, -1):
-        r = radius * i / steps
-        a = int(peak * (1 - i / steps) ** 2)
-        d.ellipse([center[0] - r, center[1] - r,
-                   center[0] + r, center[1] + r], fill=a)
-    tint = Image.new("RGB", size, color)
-    return Image.composite(tint, Image.new("RGB", size, (0, 0, 0)), layer)
+    r = 46
+    step_x = int(r * 1.73)
+    step_y = int(r * 1.5)
+    for cluster_cx, cluster_cy, span in ((150, 130, 4), (880, 110, 4)):
+        for row in range(span):
+            for col in range(span):
+                cx = cluster_cx + (col - span / 2) * step_x
+                cy = cluster_cy + (row - span / 2) * step_y
+                if row % 2:
+                    cx += step_x / 2
+                fade = 1.0 - (abs(cx - cluster_cx) + abs(cy - cluster_cy)) / 420.0
+                if fade <= 0:
+                    continue
+                a = int(26 * fade)
+                d.polygon(hexagon(cx, cy, r), fill=(255, 190, 80, max(0, a - 12)),
+                          outline=(255, 205, 100, a))
+    img.alpha_composite(layer)
 
 
-def hexagon(draw, cx, cy, r, outline, width):
-    pts = [(cx + r * math.cos(math.radians(30 + 60 * k)),
-            cy + r * math.sin(math.radians(30 + 60 * k))) for k in range(6)]
-    draw.line(pts + [pts[0]], fill=outline, width=width, joint="curve")
+def draw_pool(img):
+    """The honey pool at the bottom: deep gold ellipse, glossy top."""
+    layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    d = ImageDraw.Draw(layer)
+    # Body of the pool: stacked ellipses, darker at the rim, lighter inside.
+    d.ellipse((72, 768, 952, 992), fill=GOLD_DEEP + (255,))
+    d.ellipse((102, 786, 922, 972), fill=(232, 158, 32) + (255,))
+    d.ellipse((150, 806, 874, 952), fill=GOLD + (255,))
+    # Bright sheen across the upper half of the pool.
+    d.ellipse((190, 800, 834, 920), fill=(255, 214, 110) + (255,))
+    # Dark lower crescent for depth.
+    d.ellipse((150, 880, 874, 972), fill=(176, 104, 8) + (255,))
+    d.ellipse((230, 896, 794, 962), fill=(196, 118, 10) + (255,))
+    img.alpha_composite(layer.filter(ImageFilter.GaussianBlur(1.0)))
+    # Crisp glossy arcs on the pool surface.
+    top = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    td = ImageDraw.Draw(top)
+    td.arc((170, 800, 854, 940), start=200, end=340, fill=(255, 232, 160, 200), width=7)
+    td.arc((250, 830, 774, 950), start=205, end=335, fill=(255, 240, 190, 150), width=4)
+    img.alpha_composite(top)
+
+
+def ribbon_points(t):
+    """One S-shaped pour: from the dipper tip down to the pool."""
+    y = 330 + 480 * t
+    x = 668 + 88 * math.sin(t * 3.4) - 62 * t
+    return x, y
+
+
+def draw_ribbon(img):
+    """Glossy golden ribbon with a soft glow, dark edge and light core."""
+    glow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    gd = ImageDraw.Draw(glow)
+    body = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    bd = ImageDraw.Draw(body)
+    n = 260
+    for i in range(n + 1):
+        t = i / n
+        x, y = ribbon_points(t)
+        w = 20 + 11 * math.sin(math.pi * t)
+        gd.ellipse((x - w - 16, y - w - 16, x + w + 16, y + w + 16),
+                   fill=(255, 180, 50, 110))
+        bd.ellipse((x - w - 2, y - w - 2, x + w + 2, y + w + 2),
+                   fill=GOLD_DARK + (255,))
+        bd.ellipse((x - w, y - w, x + w, y + w), fill=GOLD + (255,))
+        # Bright core, offset up-left so the ribbon reads as lit.
+        hw = w * 0.52
+        bd.ellipse((x - hw - 8, y - hw - 3, x + hw - 8, y + hw - 3),
+                   fill=(255, 232, 150, 255))
+    img.alpha_composite(glow.filter(ImageFilter.GaussianBlur(14)))
+    img.alpha_composite(body.filter(ImageFilter.GaussianBlur(0.7)))
+    # Impact mound where the ribbon meets the pool.
+    top = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    td = ImageDraw.Draw(top)
+    ix, iy = ribbon_points(1.0)
+    td.ellipse((ix - 66, iy - 26, ix + 66, iy + 34), fill=GOLD + (255,))
+    td.ellipse((ix - 44, iy - 30, ix + 44, iy + 8), fill=GOLD_LIGHT + (255,))
+    td.ellipse((ix - 20, iy - 26, ix + 20, iy - 6), fill=(255, 240, 190, 255))
+    # Ripples around the impact.
+    for k, (rx, ry, a) in enumerate(((110, 26, 150), (170, 40, 110), (235, 54, 70))):
+        td.ellipse((ix - rx, iy - 14 - ry, ix + rx, iy - 14 + ry),
+                   outline=(255, 226, 140, a), width=4)
+    # A droplet that just left the ribbon, mid-air.
+    td.ellipse((ix + 118, iy - 190, ix + 142, iy - 152), fill=GOLD + (255,))
+    td.ellipse((ix + 124, iy - 186, ix + 136, iy - 168), fill=GOLD_LIGHT + (255,))
+    img.alpha_composite(top)
+
+
+def draw_dipper(img):
+    """Wooden honey dipper, tilted, head down-right where the pour starts."""
+    layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    d = ImageDraw.Draw(layer)
+    # Handle axis: from head centre H up-left at 210 degrees.
+    hx, hy = 585.0, 275.0
+    ux, uy = math.cos(math.radians(210)), math.sin(math.radians(210))
+    vx, vy = -uy, ux  # perpendicular, width direction
+    ex, ey = hx + 385 * ux, hy + 385 * uy  # handle end
+    hw = 17.0
+    d.polygon([(hx + hw * vx, hy + hw * vy), (ex + hw * vx, ey + hw * vy),
+               (ex - hw * vx, ey - hw * vy), (hx - hw * vx, hy - hw * vy)],
+              fill=WOOD + (255,))
+    d.polygon([(hx + hw * vx, hy + hw * vy), (ex + hw * vx, ey + hw * vy),
+               (ex + (hw - 6) * vx, ey + (hw - 6) * vy),
+               (hx + (hw - 6) * vx, hy + (hw - 6) * vy)],
+              fill=WOOD_LIGHT + (255,))
+    # Grooves along the handle.
+    for s in (90, 170, 250, 330):
+        gx, gy = hx + s * ux, hy + s * uy
+        d.line([(gx - hw * vx, gy - hw * vy), (gx + hw * vx, gy + hw * vy)],
+               fill=WOOD_DARK + (255,), width=4)
+    # Head: grooved bulb past the handle, along the down-right direction.
+    dx, dy = -ux, -uy
+    cx, cy = hx + 62 * dx, hy + 62 * dy
+    px, py = -dy, dx  # long axis of the bulb is along (dx, dy)
+    # Bulb as a rotated ellipse (polygon), long axis along the pour.
+    pts = []
+    for k in range(48):
+        a = 2 * math.pi * k / 48
+        ox = 62 * math.cos(a)
+        oy = 46 * math.sin(a)
+        pts.append((cx + ox * dx + oy * px, cy + ox * dy + oy * py))
+    d.polygon(pts, fill=WOOD + (255,))
+    # Groove rings across the bulb, perpendicular to its long axis.
+    for s in (-38, -14, 10, 34):
+        gx, gy = cx + s * dx, cy + s * dy
+        half = 46 * math.sqrt(max(0.0, 1 - (s / 62.0) ** 2))
+        d.line([(gx - half * px, gy - half * py), (gx + half * px, gy + half * py)],
+               fill=WOOD_DARK + (255,), width=6)
+    # Warm highlight on the bulb's lit side.
+    hpts = []
+    for k in range(32):
+        a = 2 * math.pi * k / 32
+        ox = 40 * math.cos(a)
+        oy = 30 * math.sin(a)
+        hpts.append((cx - 12 + ox * dx + oy * px, cy - 14 + ox * dy + oy * py))
+    d.polygon(hpts, fill=WOOD_LIGHT + (200,))
+    # Honey coating the bottom of the head, dripping into the ribbon.
+    d.ellipse((cx + 30, cy + 40, cx + 66, cy + 76), fill=GOLD + (255,))
+    img.alpha_composite(layer)
+
+
+def draw_vignette(img):
+    mask = Image.new("L", (W, H), 0)
+    md = ImageDraw.Draw(mask)
+    for i in range(1, 41):
+        inset = 512 - i * 13
+        alpha = int(120 * (i / 40.0) ** 1.5)
+        md.ellipse((-inset, -inset, W + inset, H + inset), fill=alpha)
+    dark = Image.new("RGBA", (W, H), (8, 4, 1, 255))
+    dark.putalpha(mask)
+    img.alpha_composite(dark)
+
+
+def build_image():
+    img = Image.new("RGBA", (W, H), (0, 0, 0, 255))
+    draw_background(img)
+    draw_honeycomb(img)
+    draw_pool(img)
+    draw_ribbon(img)
+    draw_dipper(img)
+    draw_vignette(img)
+    return img.convert("RGB")
 
 
 def main():
-    img = vertical_gradient((W, H), BG_TOP, BG_BOT)
-    img.paste(radial_glow((W, H), (W // 2, int(H * 0.72)), int(W * 0.52),
-                          GLOW, peak=96), (0, 0))
-
-    # ---- faint honeycomb, top corners ------------------------------------
-    comb = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    cd = ImageDraw.Draw(comb)
-    r = 150
-    dx, dy = int(r * 1.5), int(r * 0.866)
-    for gx in range(-1, 10):
-        for gy in range(-1, 5):
-            cx = gx * dx + (r * 0.75 if gy % 2 else 0)
-            cy = gy * dy
-            if cx < W * 0.42 and cy < H * 0.42:
-                hexagon(cd, cx, cy, r, COMB + (46,), 5)
-            if cx > W * 0.58 and cy < H * 0.42:
-                hexagon(cd, cx, cy, r, COMB + (46,), 5)
-    comb = comb.filter(ImageFilter.GaussianBlur(3))
-    img = Image.alpha_composite(img.convert("RGBA"), comb).convert("RGB")
-
-    d = ImageDraw.Draw(img, "RGBA")
-
-    # ---- honey pool ------------------------------------------------------
-    pool_cx, pool_cy = W // 2, int(H * 0.86)
-    pool_rx, pool_ry = int(W * 0.40), int(H * 0.115)
-    # soft shadow under the pool
-    d.ellipse([pool_cx - pool_rx - 30, pool_cy - pool_ry + 46,
-               pool_cx + pool_rx + 30, pool_cy + pool_ry + 90],
-              fill=(0, 0, 0, 110))
-    # pool body: stacked ellipses, dark rim -> bright centre
-    for i in range(26, 0, -1):
-        t = i / 26
-        rx = pool_rx * (0.55 + 0.45 * t)
-        ry = pool_ry * (0.55 + 0.45 * t)
-        col = lerp(HONEY_BRIGHT, HONEY_DARK, t * 0.85)
-        d.ellipse([pool_cx - rx, pool_cy - ry, pool_cx + rx, pool_cy + ry],
-                  fill=col + (255,))
-    # swirl arcs inside the pool
-    for k, (rr, a0, a1, col, wdt) in enumerate([
-            (0.62, 195, 345, HONEY_DARK, 10),
-            (0.74, 15, 165, HONEY_MID, 8),
-            (0.50, 20, 160, HONEY_LIGHT, 7),
-            (0.84, 200, 330, HONEY_DARK, 7)]):
-        d.arc([pool_cx - pool_rx * rr, pool_cy - pool_ry * rr,
-               pool_cx + pool_rx * rr, pool_cy + pool_ry * rr],
-              a0, a1, fill=col + (150,), width=wdt)
-    # glossy speculars on the pool
-    d.ellipse([pool_cx - 300, pool_cy - 118, pool_cx + 60, pool_cy - 34],
-              fill=HIGHLIGHT + (90,))
-    d.ellipse([pool_cx + 180, pool_cy + 30, pool_cx + 420, pool_cy + 96],
-              fill=HIGHLIGHT + (60,))
-
-    # ---- honey ribbon: one S-curve from dipper to pool -------------------
-    ctrl = [(1330, 620), (1150, 830), (1380, 1080), (1150, 1330),
-            (1024, 1560)]
-    path = catmull_rom(ctrl, samples=30)
-    # layered filled ribbons: dark edge, mid body, bright core
-    for width, col in [(150, HONEY_DARK), (118, HONEY_MID),
-                       (78, HONEY_LIGHT), (40, HONEY_BRIGHT)]:
-        d.polygon(ribbon_polygon(path, width), fill=col + (255,))
-    # specular thread, offset to the light side
-    thread = [(x - 26, y - 6) for (x, y) in path]
-    d.polygon(ribbon_polygon(thread, 16), fill=HIGHLIGHT + (215,))
-    # thickening blob where the ribbon meets the pool
-    d.ellipse([968, 1480, 1140, 1620], fill=HONEY_LIGHT + (255,))
-    d.ellipse([990, 1500, 1110, 1590], fill=HONEY_BRIGHT + (255,))
-    # small droplets kicked up at the impact point
-    for (x, y, r) in [(900, 1450, 18), (1150, 1420, 14), (1024, 1380, 12)]:
-        d.ellipse([x - r, y - r, x + r, y + r], fill=HONEY_BRIGHT + (255,))
-
-    # ---- falling droplets (clear of the ribbon) ---------------------------
-    for (x, y, r) in [(700, 900, 26), (1520, 980, 20)]:
-        d.ellipse([x - r, y - r, x + r, y + int(r * 1.25)],
-                  fill=HONEY_LIGHT + (255,))
-        d.ellipse([x - r + 6, y - r + 5, x - r + 16, y - r + 15],
-                  fill=HIGHLIGHT + (235,))
-
-    # ---- wooden dipper, top right, tilted --------------------------------
-    dip = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    dd = ImageDraw.Draw(dip)
-    # handle: long rounded bar from top-right corner down to the head
-    hx0, hy0, hx1, hy1 = 1560, 60, 1440, 560
-    dd.line([(hx0, hy0), (hx1, hy1)], fill=WOOD + (255,), width=92,
-            joint="curve")
-    dd.line([(hx0 - 16, hy0), (hx1 - 16, hy1)], fill=WOOD_LIGHT + (255,),
-            width=26, joint="curve")
-    # grooved head: stacked rounded discs around (1370, 640)
-    cx, cy = 1370, 640
-    for i, (oy, rw, rh) in enumerate([(-96, 150, 62), (-32, 168, 62),
-                                      (32, 168, 62), (96, 150, 62)]):
-        col = WOOD if i % 2 == 0 else WOOD_DARK
-        dd.ellipse([cx - rw, cy + oy - rh, cx + rw, cy + oy + rh],
-                   fill=col + (255,))
-        dd.arc([cx - rw, cy + oy - rh, cx + rw, cy + oy + rh],
-               200, 340, fill=WOOD_LIGHT + (200,), width=10)
-    # honey coating the head, dripping from its tip
-    dd.ellipse([cx - 150, cy + 60, cx + 150, cy + 190],
-               fill=HONEY_MID + (255,))
-    dd.ellipse([cx - 120, cy + 90, cx + 120, cy + 185],
-               fill=HONEY_LIGHT + (255,))
-    dd.ellipse([cx - 40, cy + 150, cx + 40, cy + 260],
-               fill=HONEY_LIGHT + (255,))
-    dip = dip.rotate(-24, center=(cx, cy), resample=Image.BICUBIC)
-    img = Image.alpha_composite(img.convert("RGBA"), dip).convert("RGB")
-
-    # ---- vignette ---------------------------------------------------------
-    vig = Image.new("L", (W, H), 0)
-    vd = ImageDraw.Draw(vig)
-    vd.ellipse([-W * 0.18, -H * 0.18, W * 1.18, H * 1.18], fill=255)
-    vig = vig.filter(ImageFilter.GaussianBlur(220))
-    black = Image.new("RGB", (W, H), (0, 0, 0))
-    img = Image.composite(img, black, vig)
-
-    img = img.resize((1024, 1024), Image.LANCZOS)
-    img.save(OUT, "PNG", optimize=True)
-    print(f"wrote {OUT}: {img.size}")
+    out = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "entry.png")
+    img = build_image()
+    img.save(out, format="PNG", optimize=True)
+    size = os.path.getsize(out)
+    print(f"wrote {out} 1024x1024 PNG {size} bytes")
+    assert size < 1048576, "entry.png exceeds 1 MiB"
 
 
 if __name__ == "__main__":
